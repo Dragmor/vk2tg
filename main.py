@@ -3,7 +3,7 @@ from tkinter import filedialog, BooleanVar
 import vk_api
 from aiogram import Bot, types
 from aiogram.dispatcher import Dispatcher
-from aiogram.utils import executor
+from aiogram.utils import executor, exceptions
 import asyncio
 import os
 import sys
@@ -50,9 +50,7 @@ class VKtoTelegram:
                 json.dump(settings, file)
 
 
-            # Создаем экземпляр бота Telegram
-            bot = Bot(token=self.tg_token)
-            dp = Dispatcher(bot)
+            
 
             # Авторизуемся в VK
             vk_session = vk_api.VkApi(token=self.vk_token)
@@ -64,13 +62,55 @@ class VKtoTelegram:
             # Обходим группу и получаем посты
             offset = 0
 
+            # если был вставлен полный адрес группы
+            if "vk.com/" in self.vk_group_id:
+                self.vk_group_id = self.vk_group_id[self.vk_group_id.find("vk.com/")+7:]
+                if "/" in self.vk_group_id:
+                    self.vk_group_id = self.vk_group_id[:self.vk_group_id.find("/")]
+            # Получите информацию о группе
+            group_info = vk.groups.getById(group_id=self.vk_group_id)
+            # Получите ID группы
+            group_id = group_info[0]['id']
+            print(f"Группа ВК: {group_info[0]['name']}, id={group_id}")
+
+            # Преобразование ТГ-адреса
+            if self.tg_chat_id[0] != "@":
+                if "t.me/" in self.tg_chat_id:
+                    self.tg_chat_id = self.tg_chat_id[self.tg_chat_id.find("t.me/")+5:]
+                    if "/" in self.tg_chat_id:
+                        self.tg_chat_id = self.tg_chat_id[:self.tg_chat_id.find("/")]
+                self.tg_chat_id = f"@{self.tg_chat_id}"
+
+            # Создаем экземпляр бота Telegram
+            bot = Bot(token=self.tg_token)
+            dp = Dispatcher(bot)
+
+            # Получите информацию о канале по его @адресу
+            chat = await bot.get_chat(self.tg_chat_id)
+
+            # Извлеките название канала
+            channel_name = chat.title
+            channel_id = chat.id
+
+            # Определить тип чата
+            if chat.type == types.ChatType.CHANNEL:
+                chat_type = "Канал"
+            elif chat.type == types.ChatType.GROUP:
+                chat_type = "Группа"
+            else:
+                chat_type = "Получатель"
+
+            print(f"{chat_type}: {channel_name}, id={channel_id}")
+
+
+
             # Получение количества постов на стене группы
-            response = vk.wall.get(owner_id=f"-{self.vk_group_id}", count=0)
+            response = vk.wall.get(owner_id=f"-{group_id}", count=0)
             post_count = response['count']
-            print(f"В сообществе всего {post_count} постов")
+            print(f"В сообществе ВК всего {post_count} постов")
             print("Начинаю сбор постов из группы...")
             while True:
-                wall = vk.wall.get(owner_id=f"-{self.vk_group_id}", count=100, offset=offset)
+                wall = vk.wall.get(owner_id=f"-{group_id}", count=100, offset=offset)
                 post_count = wall["count"]
                 
                 # Если нет постов, выходим из цикла
@@ -170,17 +210,33 @@ class VKtoTelegram:
                     message_parts = textwrap.wrap(text, width=1024, replace_whitespace=False)
                     # Если не обнаружено текстового сообщения
                     if message_parts == []:
-                        await bot.send_media_group(chat_id=self.tg_chat_id, media=media)
+                        while True:
+                            try:
+                                await bot.send_media_group(chat_id=self.tg_chat_id, media=media)
+                            except exceptions.TelegramAPIError as e:
+                                print(f"Сработала антиспам-система. Ждём...")
+                                await asyncio.sleep(10)
+                                continue
+                            else:
+                                break
 
                     for part in message_parts:
-                        if first_msg == True and media != []:
-                            # Отправляем все медиа-объекты в одном сообщении
-                            media[0].caption = part
-                            await bot.send_media_group(chat_id=self.tg_chat_id, media=media)
-                            first_msg = False
-                        else:
-                            await bot.send_message(chat_id=self.tg_chat_id, text=part, parse_mode="HTML")
-                        await asyncio.sleep(3)  # Добавляем небольшую задержку между отправкой частей сообщения
+                        while True:
+                            try:
+                                if first_msg == True and media != []:
+                                    # Отправляем все медиа-объекты в одном сообщении
+                                    media[0].caption = part
+                                    await bot.send_media_group(chat_id=self.tg_chat_id, media=media)
+                                    first_msg = False
+                                else:
+                                    await bot.send_message(chat_id=self.tg_chat_id, text=part, parse_mode="HTML")
+                                await asyncio.sleep(5)  # Добавляем небольшую задержку между отправкой частей сообщения
+                            except exceptions.TelegramAPIError as e:
+                                print(f"Сработала антиспам-система. Ждём...")
+                                await asyncio.sleep(10)
+                                continue
+                            else:
+                                break
 
                     # Добавляем задержку
                     print(f"Опубликовано: {counter}/{len(all_posts)}")
@@ -230,19 +286,19 @@ class VKtoTelegram:
         self.vk_token_entry.pack(fill="both", padx=3)
 
         # Label для токена ТГ
-        tg_token_label = tk.Label(self.root, text="Токен ТГ")
+        tg_token_label = tk.Label(self.root, text="Токен ТГ-бота")
         tg_token_label.pack(fill="both")
         self.tg_token_entry = tk.Entry(self.root)
         self.tg_token_entry.pack(fill="both", padx=3)
 
         # Label для id бота ТГ
-        tg_chat_id_label = tk.Label(self.root, text="id бота ТГ")
+        tg_chat_id_label = tk.Label(self.root, text="ТГ-канал/группа (адрес или @channel_username)")
         tg_chat_id_label.pack(fill="both")
         self.tg_chat_id_entry = tk.Entry(self.root)
         self.tg_chat_id_entry.pack(fill="both", padx=3)
 
         # Label для id группы ВК
-        vk_group_id_label = tk.Label(self.root, text="id группы ВК")
+        vk_group_id_label = tk.Label(self.root, text="Группа ВК (адрес)")
         vk_group_id_label.pack(fill="both")
         self.vk_group_id_entry = tk.Entry(self.root)
         self.vk_group_id_entry.pack(fill="both", padx=3)
@@ -250,7 +306,8 @@ class VKtoTelegram:
         # Scale для интервалов времени
         time_interval_label = tk.Label(self.root, text="Интервалы времени между публикациями (секунды)")
         time_interval_label.pack(fill="both")
-        self.time_interval_scale = tk.Scale(self.root, from_=5, to=3600, orient="horizontal")
+        self.time_interval_scale = tk.Scale(self.root, from_=3, to=3600, orient="horizontal")
+        self.time_interval_scale.set(10)
         self.time_interval_scale.pack(fill="both")
 
         # Entry для количества постов
